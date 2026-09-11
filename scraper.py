@@ -18,7 +18,14 @@ class RateLimitException(Exception):
     pass
 
 class RateLimitLogger:
+    def __init__(self):
+        self.no_subs_found = False
+
     def debug(self, msg):
+        # Catch the no subtitles message to flag the current video
+        if 'There are no subtitles for the requested languages' in msg or 'has no subtitles' in msg:
+            self.no_subs_found = True
+            
         if not msg.startswith('[debug] '):
             print(msg)
 
@@ -34,6 +41,15 @@ def process_channel(channel_url, current_idx, total_channels):
     raw_name = channel_url.rstrip('/').split('/')[-1].replace('@', '')
     safe_channel_name = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_name)
 
+    # --- CONFIGURE REQUESTED LANGUAGES ---
+    REQUESTED_LANGS = ['.*orig'] 
+    
+    # Generate a clever, safe identifier based on the requested languages
+    # e.g., ['.*orig'] -> "orig", ['en', 'fr'] -> "en-fr"
+    lang_identifier = "-".join(sorted(re.sub(r'[^a-zA-Z0-9]', '', lang) for lang in REQUESTED_LANGS))
+    if not lang_identifier:
+        lang_identifier = "all"
+
     # --- UPDATED PATHS ---
     BASE = "/storage/emulated/0/experiments/ytoutput"
     BASE_DIR = f"{BASE}/{safe_channel_name}"
@@ -42,9 +58,20 @@ def process_channel(channel_url, current_idx, total_channels):
     ARCHIVE_FILE = f"{BASE}/{META}/{safe_channel_name}/archive_ledger.txt"
     PLAYLIST_FILE = f"{BASE}/{META}/{safe_channel_name}/playlist.txt"
     
+    # The cache filename now dynamically adapts to your requested languages!
+    NO_SUBS_FILE = f"{BASE}/{META}/{safe_channel_name}/no_subs_{lang_identifier}.txt" 
+    
     print(f"\n===========================================================")
     print(f" [QUEUE] Starting Channel {current_idx} of {total_channels}: {safe_channel_name}")
     print(f"===========================================================\n")
+
+    # Load previously checked IDs that had no subtitles
+    no_subs_set = set()
+    if os.path.exists(NO_SUBS_FILE):
+        with open(NO_SUBS_FILE, 'r') as f:
+            no_subs_set = set(line.strip() for line in f if line.strip())
+
+    custom_logger = RateLimitLogger()
 
     ydl_opts = {
         'skip_download': True,
@@ -52,7 +79,7 @@ def process_channel(channel_url, current_idx, total_channels):
         'writeautomaticsub': True,
         
         # --- ANY ENGLISH & ORIGINAL CONFIG ---
-        'subtitleslangs': ['.*orig', 'en.*'], 
+        'subtitleslangs': REQUESTED_LANGS, 
         
         'subtitlesformat': 'srt',
         'writethumbnail': False,
@@ -68,7 +95,7 @@ def process_channel(channel_url, current_idx, total_channels):
         'download_archive': ARCHIVE_FILE,
         'outtmpl': f'{BASE_DIR}/%(title).100s_[%(id)s].%(ext)s',
         'quiet': False,
-        'logger': RateLimitLogger(),
+        'logger': custom_logger,
     }
 
     def ensure_playlist():
@@ -95,11 +122,6 @@ def process_channel(channel_url, current_idx, total_channels):
             sys.exit(1)
 
     def enforce_single_subtitle():
-        """
-        Scans the folder and groups files by their Video ID. 
-        Keeps the subtitle with the largest file size. 
-        If sizes are equal, falls back to the priority ranking system.
-        """
         if not os.path.exists(BASE_DIR):
             return
             
@@ -172,13 +194,32 @@ def process_channel(channel_url, current_idx, total_channels):
             
         total_videos = len(video_urls)
         print(f"[INIT] Loaded {total_videos} URLs from the cache to process.")
+        print(f"[INIT] Loaded {len(no_subs_set)} videos known to have no subtitles.")
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 for idx, url in enumerate(video_urls, start=1):
+                    vid_id = url.split('v=')[-1]
+                    percent = (idx / total_videos) * 100
+                    
+                    # 1) If we already know it has no subs, skip it natively
+                    if vid_id in no_subs_set:
+                        print(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        print(f" [{safe_channel_name}] PROGRESS: {idx} / {total_videos} Videos ({percent:.2f}%) ")
+                        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        print(f" [SKIP] {vid_id}: Already checked, no subtitles available.\n")
+                        continue
+                    
+                    # 2) Reset the flag and extract
+                    custom_logger.no_subs_found = False
                     ydl.download([url])
                     
-                    percent = (idx / total_videos) * 100
+                    # 3) If it triggered the no subtitles warning, log it forever
+                    if custom_logger.no_subs_found:
+                        no_subs_set.add(vid_id)
+                        with open(NO_SUBS_FILE, 'a') as nf:
+                            nf.write(f"{vid_id}\n")
+                            
                     print(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                     print(f" [{safe_channel_name}] PROGRESS: {idx} / {total_videos} Videos ({percent:.2f}%) ")
                     print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
@@ -214,3 +255,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nScript manually stopped by user.")
         sys.exit(0)
+
